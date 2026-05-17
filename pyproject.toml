@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dotfile-sync"
+version = "1.0.0"
+description = "Keep your dotfiles in sync across machines. A Python CLI for backing up, versioning, and restoring your config files."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "jlaportebot" },
+]
+keywords = ["dotfiles", "backup", "sync", "cli", "git"]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Backup",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "gitpython>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+dotfile-sync = "dotfile_sync.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jlaportebot/dotfile-sync"
+Repository = "https://github.com/jlaportebot/dotfile-sync"
+Issues = "https://github.com/jlaportebot/dotfile-sync/issues"
+
+[tool.setuptools.packages.find]
+include = ["dotfile_sync*"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
