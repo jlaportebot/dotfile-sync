@@ -195,9 +195,7 @@ class TestBackup:
         result = sync_repo.backup()
         assert "No files tracked" in result
 
-    def test_backup_file_content_preserved(
-        self, sync_repo: DotfileSync, tmp_home: Path
-    ) -> None:
+    def test_backup_file_content_preserved(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
         content = "# My bashrc\n"
         (tmp_home / ".bashrc").write_text(content)
         sync_repo.track(str(tmp_home / ".bashrc"))
