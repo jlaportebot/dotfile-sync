@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from git import Repo
 
@@ -35,20 +35,20 @@ class Manifest:
 
     def _load(self) -> None:
         if self.manifest_path.exists():
-            with open(self.manifest_path) as f:
+            with Path(self.manifest_path).open() as f:
                 self._data = json.load(f)
         else:
             self._data = {"version": "1.0", "files": []}
 
     def save(self) -> None:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.manifest_path, "w") as f:
+        with Path(self.manifest_path).open("w") as f:
             json.dump(self._data, f, indent=2)
             f.write("\n")
 
     @property
     def files(self) -> list[dict[str, str]]:
-        return self._data.get("files", [])
+        return cast(list[dict[str, str]], self._data.get("files", []))
 
     def add_file(self, original_path: str, repo_path: str) -> None:
         """Add a file to the manifest."""
@@ -56,13 +56,11 @@ class Manifest:
         for entry in self.files:
             if entry["original_path"] == original_path:
                 return  # Already tracked
-        self._data["files"].append(
-            {
-                "original_path": original_path,
-                "repo_path": repo_path,
-                "added_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        self._data["files"].append({
+            "original_path": original_path,
+            "repo_path": repo_path,
+            "added_at": datetime.now(UTC).isoformat(),
+        })
         self.save()
 
     def remove_file(self, original_path: str) -> bool:
@@ -212,7 +210,7 @@ class DotfileSync:
         repo.index.add([str(self.files_dir)])
         repo.index.add([str(self.manifest_path)])
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         commit_msg = message or f"backup: {backed_up} file(s) at {timestamp}"
         repo.index.commit(commit_msg)
 
