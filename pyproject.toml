@@ -30,6 +30,8 @@ dependencies = [
     "click>=8.1",
     "rich>=13.7",
     "gitpython>=3.1",
+    "jinja2>=3.1.6",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -95,7 +97,7 @@ testpaths = ["tests"]
 addopts = [
     "--cov=dotfile_sync",
     "--cov-report=term-missing",
-    "--cov-fail-under=70",
+    "--cov-fail-under=80",
     "-v",
 ]
 filterwarnings = [

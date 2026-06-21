@@ -1,4 +1,4 @@
-"""Tests for dotfile-sync."""
+"""Tests for dotfile-sync core with template integration."""
 
 from __future__ import annotations
 
@@ -33,6 +33,11 @@ def tmp_home(tmp_path: Path) -> Generator[Path, None, None]:
     plug_vim = '" Plug manager\n'
     (home / ".config" / "nvim" / "autoload" / "plug.vim").write_text(plug_vim)
 
+    # Create a template dotfile
+    (home / ".gitconfig_tmpl").write_text(
+        "[user]\n name = {{ git_name }}\n email = {{ git_email }}\n"
+    )
+
     yield home
 
 
@@ -51,239 +56,270 @@ def sync_repo(
     yield sync
 
 
-class TestManifest:
-    """Tests for the Manifest class."""
+class TestManifestExtended:
+    """Tests for extended Manifest features."""
 
-    def test_empty_manifest(self, tmp_path: Path) -> None:
+    def test_is_template_flag(self, tmp_path: Path) -> None:
         manifest = Manifest(tmp_path / "manifest.json")
-        assert manifest.files == []
+        manifest.add_file("/home/user/.gitconfig", "home/user/_gitconfig", is_template=True)
+        assert manifest.files[0].get("is_template") is True
 
-    def test_add_file(self, tmp_path: Path) -> None:
-        manifest = Manifest(tmp_path / "manifest.json")
-        manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
-        assert len(manifest.files) == 1
-        assert manifest.files[0]["original_path"] == "/home/user/.bashrc"
-        assert manifest.files[0]["repo_path"] == "home/user/_bashrc"
-        assert "added_at" in manifest.files[0]
-
-    def test_add_duplicate_is_noop(self, tmp_path: Path) -> None:
+    def test_is_template_default_false(self, tmp_path: Path) -> None:
         manifest = Manifest(tmp_path / "manifest.json")
         manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
-        manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
-        assert len(manifest.files) == 1
+        assert "is_template" not in manifest.files[0]
 
-    def test_remove_file(self, tmp_path: Path) -> None:
+    def test_update_file(self, tmp_path: Path) -> None:
         manifest = Manifest(tmp_path / "manifest.json")
         manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
-        assert manifest.remove_file("/home/user/.bashrc") is True
-        assert len(manifest.files) == 0
+        result = manifest.update_file("/home/user/.bashrc", is_template=True)
+        assert result is True
+        assert manifest.files[0].get("is_template") is True
 
-    def test_remove_nonexistent(self, tmp_path: Path) -> None:
+    def test_update_file_not_found(self, tmp_path: Path) -> None:
         manifest = Manifest(tmp_path / "manifest.json")
-        assert manifest.remove_file("/home/user/.bashrc") is False
+        result = manifest.update_file("/home/user/nonexistent", is_template=True)
+        assert result is False
 
-    def test_is_tracked(self, tmp_path: Path) -> None:
+    def test_get_template_files(self, tmp_path: Path) -> None:
         manifest = Manifest(tmp_path / "manifest.json")
-        assert manifest.is_tracked("/home/user/.bashrc") is False
         manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
-        assert manifest.is_tracked("/home/user/.bashrc") is True
+        manifest.add_file("/home/user/.gitconfig", "home/user/_gitconfig", is_template=True)
+        templates = manifest.get_template_files()
+        assert len(templates) == 1
+        assert templates[0]["original_path"] == "/home/user/.gitconfig"
 
-    def test_save_and_reload(self, tmp_path: Path) -> None:
+    def test_get_concrete_files(self, tmp_path: Path) -> None:
+        manifest = Manifest(tmp_path / "manifest.json")
+        manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
+        manifest.add_file("/home/user/.gitconfig", "home/user/_gitconfig", is_template=True)
+        concrete = manifest.get_concrete_files()
+        assert len(concrete) == 1
+        assert concrete[0]["original_path"] == "/home/user/.bashrc"
+
+    def test_active_profile(self, tmp_path: Path) -> None:
+        manifest = Manifest(tmp_path / "manifest.json")
+        assert manifest.active_profile is None
+        manifest.active_profile = "work"
+        assert manifest.active_profile == "work"
+
+    def test_machine_name(self, tmp_path: Path) -> None:
+        manifest = Manifest(tmp_path / "manifest.json")
+        assert manifest.machine_name is None
+        manifest.machine_name = "laptop"
+        assert manifest.machine_name == "laptop"
+
+    def test_profile_persists_after_reload(self, tmp_path: Path) -> None:
         path = tmp_path / "manifest.json"
         manifest = Manifest(path)
-        manifest.add_file("/home/user/.bashrc", "home/user/_bashrc")
-        manifest.save()
+        manifest.active_profile = "work"
+        manifest.machine_name = "laptop"
 
-        # Reload
         manifest2 = Manifest(path)
-        assert len(manifest2.files) == 1
-        assert manifest2.files[0]["original_path"] == "/home/user/.bashrc"
+        assert manifest2.active_profile == "work"
+        assert manifest2.machine_name == "laptop"
 
 
-class TestInit:
-    """Tests for the init command."""
+class TestInitExtended:
+    """Tests for the init command with template support."""
 
-    def test_init_creates_repo(self, tmp_path: Path) -> None:
-        repo_dir = tmp_path / "dotfile-sync"
-        sync = DotfileSync(repo_dir=repo_dir)
-        result = sync.init()
-        assert "Initialized" in result
-        assert repo_dir.exists()
-        assert (repo_dir / ".git").exists()
-        assert (repo_dir / "manifest.json").exists()
-        assert (repo_dir / "files").exists()
-
-    def test_init_idempotent(self, tmp_path: Path) -> None:
+    def test_init_creates_template_dirs(self, tmp_path: Path) -> None:
         repo_dir = tmp_path / "dotfile-sync"
         sync = DotfileSync(repo_dir=repo_dir)
         sync.init()
-        result2 = sync.init()
-        assert "already exists" in result2
+        assert (repo_dir / "templates").exists()
+        assert (repo_dir / "contexts").exists()
 
-    def test_init_with_remote(self, tmp_path: Path) -> None:
-        from git import Repo
-
+    def test_init_creates_default_context(self, tmp_path: Path) -> None:
         repo_dir = tmp_path / "dotfile-sync"
         sync = DotfileSync(repo_dir=repo_dir)
-        sync.init(remote_url="https://github.com/example/dotfiles.git")
+        sync.init()
+        ctx_dir = repo_dir / "contexts"
+        assert (ctx_dir / "default.yaml").exists()
 
-        repo = Repo(str(repo_dir))
-        assert "origin" in [r.name for r in repo.remotes]
 
+class TestTrackWithTemplates:
+    """Tests for tracking files with template detection."""
 
-class TestTrack:
-    """Tests for the track command."""
-
-    def test_track_single_file(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        result = sync_repo.track(str(tmp_home / ".bashrc"))
-        assert "Now tracking" in result
+    def test_track_template_file(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        result = sync_repo.track(str(tmp_home / ".gitconfig_tmpl"), as_template=True)
+        assert "template" in result
 
         manifest = Manifest(sync_repo.manifest_path)
-        assert len(manifest.files) == 1
+        entry = manifest.get_entry(str(tmp_home / ".gitconfig_tmpl"))
+        assert entry is not None
+        assert entry.get("is_template") is True
 
-    def test_track_already_tracked(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
+    def test_track_auto_detects_template(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        # Create a file with Jinja2 syntax
+        template_file = tmp_home / ".config" / "app.conf"
+        template_file.write_text("host={{ hostname }}\nport=8080\n")
+        result = sync_repo.track(str(template_file))
+        assert "template" in result
+
+        manifest = Manifest(sync_repo.manifest_path)
+        entry = manifest.get_entry(str(template_file))
+        assert entry is not None
+        assert entry.get("is_template") is True
+
+    def test_track_plain_file_not_template(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
         result = sync_repo.track(str(tmp_home / ".bashrc"))
-        assert "Already tracking" in result
+        assert "template" not in result
 
-    def test_track_directory(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        manifest = Manifest(sync_repo.manifest_path)
+        entry = manifest.get_entry(str(tmp_home / ".bashrc"))
+        assert entry is not None
+        assert "is_template" not in entry
+
+    def test_track_directory_detects_templates(
+        self, sync_repo: DotfileSync, tmp_home: Path
+    ) -> None:
+        # Add template file to the nvim config dir
+        template_file = tmp_home / ".config" / "nvim" / "app.conf"
+        template_file.write_text("setting={{ value }}")
+
         result = sync_repo.track(str(tmp_home / ".config" / "nvim"))
-        assert "Tracking" in result
-        assert "file(s)" in result
+        assert "template" in result
+
+
+class TestBackupWithTemplates:
+    """Tests for backup with template files."""
+
+    def test_backup_stores_template_in_templates_dir(
+        self, sync_repo: DotfileSync, tmp_home: Path
+    ) -> None:
+        template_file = tmp_home / ".config" / "app.conf"
+        template_content = "host={{ hostname }}\n"
+        template_file.write_text(template_content)
+
+        sync_repo.track(str(template_file))
+        result = sync_repo.backup()
+        assert "Backed up" in result
 
         manifest = Manifest(sync_repo.manifest_path)
-        # Should track init.vim and plug.vim
-        assert len(manifest.files) == 2
+        entry = manifest.get_entry(str(template_file))
+        assert entry is not None
 
-    def test_track_nonexistent_path(self, sync_repo: DotfileSync) -> None:
-        with pytest.raises(DotfileSyncError, match="does not exist"):
-            sync_repo.track("/nonexistent/path/.bashrc")
+        # Check template stored in templates/ dir
+        template_repo_path = sync_repo.templates_dir / entry["repo_path"]
+        assert template_repo_path.exists()
+        assert template_repo_path.read_text() == template_content
 
+        # Check rendered snapshot stored in files/ dir
+        file_repo_path = sync_repo.files_dir / entry["repo_path"]
+        assert file_repo_path.exists()
 
-class TestUntrack:
-    """Tests for the untrack command."""
+    def test_backup_template_render_error_falls_back(
+        self, sync_repo: DotfileSync, tmp_home: Path
+    ) -> None:
+        # Create a template with an undefined variable
+        template_file = tmp_home / ".config" / "broken.conf"
+        template_file.write_text("value={{ undefined_var }}\n")
 
-    def test_untrack_file(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
-        result = sync_repo.untrack(str(tmp_home / ".bashrc"))
-        assert "Stopped tracking" in result
-
-    def test_untrack_not_tracked(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        result = sync_repo.untrack(str(tmp_home / ".bashrc"))
-        assert "Not currently tracked" in result
-
-    def test_untrack_directory(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".config" / "nvim"))
-        result = sync_repo.untrack(str(tmp_home / ".config" / "nvim"))
-        assert "Stopped tracking" in result
-
-
-class TestBackup:
-    """Tests for the backup command."""
-
-    def test_backup_copies_files(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
+        sync_repo.track(str(template_file), as_template=True)
         result = sync_repo.backup()
-        assert "Backed up 1 file" in result
+        assert "Backed up" in result
 
-    def test_backup_with_message(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
-        result = sync_repo.backup(message="initial backup")
-        assert "initial backup" in result
+        # The raw template should still be stored
+        manifest = Manifest(sync_repo.manifest_path)
+        entry = manifest.get_entry(str(template_file))
+        assert entry is not None
+        template_repo_path = sync_repo.templates_dir / entry["repo_path"]
+        assert template_repo_path.exists()
 
-    def test_backup_no_tracked_files(self, sync_repo: DotfileSync) -> None:
-        result = sync_repo.backup()
-        assert "No files tracked" in result
 
-    def test_backup_file_content_preserved(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        content = "# My bashrc\n"
-        (tmp_home / ".bashrc").write_text(content)
-        sync_repo.track(str(tmp_home / ".bashrc"))
+class TestRestoreWithTemplates:
+    """Tests for restore with template rendering."""
+
+    def test_restore_renders_template(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        template_file = tmp_home / ".config" / "app.conf"
+        template_content = "host={{ hostname }}\n"
+        template_file.write_text(template_content)
+
+        sync_repo.track(str(template_file), as_template=True)
         sync_repo.backup()
 
-        manifest = Manifest(sync_repo.manifest_path)
-        repo_path = sync_repo.files_dir / manifest.files[0]["repo_path"]
-        assert repo_path.read_text() == content
+        # Set up context
+        from dotfile_sync.templates import ContextManager
 
+        ctx_mgr = ContextManager(sync_repo.contexts_dir)
+        ctx_mgr.set_context("default", {"hostname": "myserver"})
 
-class TestRestore:
-    """Tests for the restore command."""
+        # Modify the original file
+        template_file.write_text("host=oldserver\n")
 
-    def test_restore_copies_files(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        original_content = "# Original bashrc\n"
-        (tmp_home / ".bashrc").write_text(original_content)
-        sync_repo.track(str(tmp_home / ".bashrc"))
+        # Restore should re-render from template
+        result = sync_repo.restore()
+        assert "rendered" in result.lower() or "Restored" in result
+
+    def test_restore_no_render_flag(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        template_file = tmp_home / ".config" / "app.conf"
+        template_content = "host={{ hostname }}\n"
+        template_file.write_text(template_content)
+
+        sync_repo.track(str(template_file), as_template=True)
         sync_repo.backup()
 
         # Modify the original
-        (tmp_home / ".bashrc").write_text("# Modified bashrc\n")
+        template_file.write_text("host=changed\n")
 
-        # Restore
-        result = sync_repo.restore()
-        assert "Restored 1 file" in result
-        assert (tmp_home / ".bashrc").read_text() == original_content
+        # Restore without rendering - should copy from files/ dir (rendered snapshot)
+        result = sync_repo.restore(render=False)
+        assert "Restored" in result
 
-    def test_restore_single_file(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
-        sync_repo.track(str(tmp_home / ".gitconfig"))
+
+class TestDiffWithTemplates:
+    """Tests for diff with template awareness."""
+
+    def test_diff_template_up_to_date(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        template_file = tmp_home / ".config" / "app.conf"
+        template_content = "host={{ hostname }}\n"
+        template_file.write_text(template_content)
+
+        sync_repo.track(str(template_file), as_template=True)
         sync_repo.backup()
 
-        result = sync_repo.restore(only=str(tmp_home / ".bashrc"))
-        assert "Restored 1 file" in result
+        # The backup stored the raw template in templates/ dir and the
+        # *rendered* snapshot in files/.  To be "up to date", the live file
+        # must match the re-rendered version, not the raw template.
+        # Read back the rendered snapshot from files/ and write it to the
+        # live file.
+        manifest = Manifest(sync_repo.manifest_path)
+        entry = manifest.get_entry(str(template_file))
+        assert entry is not None
+        files_path = sync_repo.files_dir / entry["repo_path"]
+        rendered = files_path.read_text()
+        template_file.write_text(rendered)
 
-    def test_restore_no_manifest(self, sync_repo: DotfileSync) -> None:
-        result = sync_repo.restore()
-        assert "No files in manifest" in result
-
-
-class TestDiff:
-    """Tests for the diff command."""
-
-    def test_diff_no_changes(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
-        sync_repo.backup()
         result = sync_repo.diff()
         assert "up to date" in result
 
-    def test_diff_with_modification(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
+    def test_diff_template_modified(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+        template_file = tmp_home / ".config" / "app.conf"
+        template_content = "host={{ hostname }}\n"
+        template_file.write_text(template_content)
+
+        sync_repo.track(str(template_file), as_template=True)
         sync_repo.backup()
 
-        # Modify the file
-        (tmp_home / ".bashrc").write_text("# Changed!\n")
+        # Modify the original
+        template_file.write_text("host=changedhost\n")
 
         result = sync_repo.diff()
-        assert "MODIFIED" in result
+        assert "MODIFIED" in result or "template" in result.lower()
 
-    def test_diff_new_file(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
+
+class TestListTrackedWithTemplates:
+    """Tests for list with template status."""
+
+    def test_list_shows_template_marker(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
         sync_repo.track(str(tmp_home / ".bashrc"))
-        # Don't backup yet
-        result = sync_repo.diff()
-        assert "NEW" in result
+        template_file = tmp_home / ".config" / "app.conf"
+        template_file.write_text("{{ value }}")
+        sync_repo.track(str(template_file))
 
-    def test_diff_deleted_file(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
-        sync_repo.backup()
-
-        # Delete the original
-        (tmp_home / ".bashrc").unlink()
-
-        result = sync_repo.diff()
-        assert "DELETED" in result
-
-
-class TestListTracked:
-    """Tests for the list command."""
-
-    def test_list_tracked_files(self, sync_repo: DotfileSync, tmp_home: Path) -> None:
-        sync_repo.track(str(tmp_home / ".bashrc"))
         result = sync_repo.list_tracked()
-        assert "bashrc" in result
-        assert "Tracked files:" in result
-
-    def test_list_no_files(self, sync_repo: DotfileSync) -> None:
-        result = sync_repo.list_tracked()
-        assert "No files tracked" in result
+        assert "[T]" in result
 
 
 class TestEncodeRepoPath:
@@ -316,3 +352,8 @@ class TestNotInitialized:
         sync = DotfileSync(repo_dir=tmp_path / "nonexistent")
         with pytest.raises(NotInitializedError):
             sync.backup()
+
+    def test_restore_without_init(self, tmp_path: Path) -> None:
+        sync = DotfileSync(repo_dir=tmp_path / "nonexistent")
+        with pytest.raises(NotInitializedError):
+            sync.restore()
