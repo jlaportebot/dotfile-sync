@@ -12,7 +12,10 @@ from typing import Any, cast
 
 from git import Repo
 
+from .conflicts import ConflictDetector, ConflictResolver, ConflictStrategy
 from .errors import DotfileSyncError, NotInitializedError
+from .hooks import HookEvent, create_hook_runner
+from .ignore import create_ignore_matcher
 from .templates import (
     ContextManager,
     TemplateEngine,
@@ -295,26 +298,68 @@ class DotfileSync:
                 return f"Stopped tracking: {source}"
             return f"Not currently tracked: {source}"
 
-    def backup(self, message: str | None = None) -> str:
+    def backup(
+        self,
+        message: str | None = None,
+        *,
+        dry_run: bool = False,
+        conflict_strategy: ConflictStrategy = ConflictStrategy.MAKE_BACKUP,
+    ) -> str:
         """Copy all tracked files into the repo and commit.
 
         For template files, stores the raw template (with Jinja2 syntax) in
         the templates/ directory and a rendered snapshot in files/ for diffing.
+
+        Args:
+            message: Optional commit message.
+            dry_run: If True, don't make any changes.
+            conflict_strategy: How to handle sync conflicts.
         """
         self._ensure_initialized()
         manifest = Manifest(self.manifest_path)
         repo = self._get_repo()
+        ignore_matcher = create_ignore_matcher(self.repo_dir)
+        hook_runner = create_hook_runner(self.repo_dir)
 
         if not manifest.files:
             return "No files tracked. Use `dotfile-sync track <path>` to add files."
 
+        # Run pre-backup hooks
+        hook_runner.run_hooks(
+            HookEvent.PRE_BACKUP,
+            env={"DOTFILE_SYNC_REPO_DIR": str(self.repo_dir)},
+        )
+
+        # Check for conflicts
+        detector = ConflictDetector(self.files_dir)
+        conflicts = detector.detect_conflicts(manifest.files)
+        if conflicts:
+            resolver = ConflictResolver(conflict_strategy)
+            resolution_results = resolver.resolve_all(conflicts, self.files_dir)
+            aborted = [r for r in resolution_results if not r.resolved]
+            if aborted:
+                return (
+                    f"Backup aborted: {len(aborted)} conflict(s) could not be "
+                    f"resolved. Use --conflict-strategy to change resolution."
+                )
+
         backed_up = 0
         templates_backed = 0
+        ignored = 0
         for entry in manifest.files:
             original = Path(entry["original_path"])
             repo_path = self.files_dir / entry["repo_path"]
 
+            # Check ignore patterns
+            if ignore_matcher.is_ignored(original):
+                ignored += 1
+                continue
+
             if not original.exists():
+                continue
+
+            if dry_run:
+                backed_up += 1
                 continue
 
             repo_path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,6 +394,12 @@ class DotfileSync:
         if backed_up == 0:
             return "No tracked files found on disk. Nothing to back up."
 
+        if dry_run:
+            msg = f"Dry run: would back up {backed_up} file(s)"
+            if ignored:
+                msg += f" ({ignored} ignored)"
+            return msg
+
         # Stage and commit
         repo.index.add([str(self.files_dir)])
         repo.index.add([str(self.templates_dir)])
@@ -358,35 +409,84 @@ class DotfileSync:
         commit_msg = message or f"backup: {backed_up} file(s) at {timestamp}"
         repo.index.commit(commit_msg)
 
+        # Run post-backup hooks
+        hook_runner.run_hooks(
+            HookEvent.POST_BACKUP,
+            env={
+                "DOTFILE_SYNC_REPO_DIR": str(self.repo_dir),
+                "DOTFILE_SYNC_FILE_COUNT": str(backed_up),
+            },
+        )
+
         msg = f"Backed up {backed_up} file(s). Committed as: {commit_msg}"
         if templates_backed:
             msg += f" ({templates_backed} templates)"
+        if ignored:
+            msg += f" ({ignored} ignored)"
+        if conflicts:
+            msg += f" ({len(conflicts)} conflict(s) resolved)"
         return msg
 
-    def restore(self, only: str | None = None, *, render: bool = True) -> str:
+    def restore(
+        self,
+        only: str | None = None,
+        *,
+        render: bool = True,
+        dry_run: bool = False,
+        conflict_strategy: ConflictStrategy = ConflictStrategy.MAKE_BACKUP,
+    ) -> str:
         """Copy files from the repo back to their original locations.
 
         Args:
             only: If set, only restore this specific file path.
             render: If True, render templates with current context before
                     writing to disk. If False, write raw content.
+            dry_run: If True, don't make any changes.
+            conflict_strategy: How to handle sync conflicts.
         """
         self._ensure_initialized()
         manifest = Manifest(self.manifest_path)
+        ignore_matcher = create_ignore_matcher(self.repo_dir)
+        hook_runner = create_hook_runner(self.repo_dir)
 
         if not manifest.files:
             return "No files in manifest. Nothing to restore."
+
+        # Run pre-restore hooks
+        hook_runner.run_hooks(
+            HookEvent.PRE_RESTORE,
+            env={"DOTFILE_SYNC_REPO_DIR": str(self.repo_dir)},
+        )
+
+        # Check for conflicts
+        detector = ConflictDetector(self.files_dir)
+        conflicts = detector.detect_conflicts(manifest.files)
+        if conflicts:
+            resolver = ConflictResolver(conflict_strategy)
+            resolution_results = resolver.resolve_all(conflicts, self.files_dir)
+            aborted = [r for r in resolution_results if not r.resolved]
+            if aborted:
+                return (
+                    f"Restore aborted: {len(aborted)} conflict(s) could not be "
+                    f"resolved. Use --conflict-strategy to change resolution."
+                )
 
         restored = 0
         skipped = 0
         rendered = 0
         errors = 0
+        ignored = 0
         for entry in manifest.files:
             if only and entry["original_path"] != only:
                 continue
 
             original = Path(entry["original_path"])
             repo_path = self.files_dir / entry["repo_path"]
+
+            # Check ignore patterns
+            if ignore_matcher.is_ignored(original):
+                ignored += 1
+                continue
 
             if entry.get("is_template") and render:
                 # For templates, render from the template source
@@ -399,8 +499,9 @@ class DotfileSync:
                     engine = self._get_template_engine()
                     template_content = template_repo_path.read_text(encoding="utf-8")
                     output = engine.render(template_content, context)
-                    original.parent.mkdir(parents=True, exist_ok=True)
-                    original.write_text(output, encoding="utf-8")
+                    if not dry_run:
+                        original.parent.mkdir(parents=True, exist_ok=True)
+                        original.write_text(output, encoding="utf-8")
                     restored += 1
                     rendered += 1
                 except TemplateRenderError:
@@ -408,16 +509,33 @@ class DotfileSync:
                     continue
                 except UnicodeDecodeError:
                     # Binary template - just copy
-                    shutil.copy2(template_repo_path, original)
+                    if not dry_run:
+                        shutil.copy2(template_repo_path, original)
                     restored += 1
             else:
                 if not repo_path.exists():
                     skipped += 1
                     continue
 
-                original.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(repo_path, original)
+                if not dry_run:
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(repo_path, original)
                 restored += 1
+
+        if dry_run:
+            msg = f"Dry run: would restore {restored} file(s)"
+            if ignored:
+                msg += f" ({ignored} ignored)"
+            return msg
+
+        # Run post-restore hooks
+        hook_runner.run_hooks(
+            HookEvent.POST_RESTORE,
+            env={
+                "DOTFILE_SYNC_REPO_DIR": str(self.repo_dir),
+                "DOTFILE_SYNC_FILE_COUNT": str(restored),
+            },
+        )
 
         msg = f"Restored {restored} file(s)"
         if rendered:
@@ -426,6 +544,10 @@ class DotfileSync:
             msg += f", skipped {skipped} (not found in repo)"
         if errors:
             msg += f", {errors} template error(s)"
+        if ignored:
+            msg += f" ({ignored} ignored)"
+        if conflicts:
+            msg += f" ({len(conflicts)} conflict(s) resolved)"
         return msg
 
     def diff(self) -> str:
