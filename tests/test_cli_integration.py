@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from dotfile_sync.cli import main
+from dotfile_sync.conflicts import ConflictStrategy
 from dotfile_sync.core import DotfileSync
 
 
@@ -205,7 +206,12 @@ class TestCLIRestore:
             mock_inst.restore.return_value = "Restored 3 file(s)"
             result = runner.invoke(main, ["restore", "--no-render"])
             assert result.exit_code == 0
-            mock_inst.restore.assert_called_once_with(only=None, render=False)
+            mock_inst.restore.assert_called_once_with(
+                only=None,
+                render=False,
+                dry_run=False,
+                conflict_strategy=ConflictStrategy.MAKE_BACKUP,
+            )
 
 
 class TestCLIDiff:

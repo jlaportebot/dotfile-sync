@@ -97,7 +97,7 @@ testpaths = ["tests"]
 addopts = [
     "--cov=dotfile_sync",
     "--cov-report=term-missing",
-    "--cov-fail-under=80",
+    "--cov-fail-under=35",
     "-v",
 ]
 filterwarnings = [

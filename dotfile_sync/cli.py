@@ -84,22 +84,69 @@ def list_files() -> None:
 
 @main.command()
 @click.option("--message", "-m", default=None, help="Commit message for the backup.")
+@click.option(
+    "--dry-run", is_flag=True, help="Preview what would be backed up without making changes."
+)
+@click.option(
+    "--conflict-strategy",
+    type=click.Choice(["skip", "keep-local", "keep-repo", "keep-newer", "make-backup", "abort"]),
+    default="make-backup",
+    help="How to handle sync conflicts.",
+)
 @_handle_error
-def backup(message: str | None) -> None:
+def backup(message: str | None, dry_run: bool, conflict_strategy: str) -> None:
     """Copy tracked files into the repo and commit."""
+    from .conflicts import ConflictStrategy
+
+    strategy_map = {
+        "skip": ConflictStrategy.SKIP,
+        "keep-local": ConflictStrategy.KEEP_LOCAL,
+        "keep-repo": ConflictStrategy.KEEP_REPO,
+        "keep-newer": ConflictStrategy.KEEP_NEWER,
+        "make-backup": ConflictStrategy.MAKE_BACKUP,
+        "abort": ConflictStrategy.ABORT,
+    }
     sync = DotfileSync()
-    result = sync.backup(message=message)
+    result = sync.backup(
+        message=message,
+        dry_run=dry_run,
+        conflict_strategy=strategy_map[conflict_strategy],
+    )
     console.print(Panel(result, title="💾 Backup", border_style="blue"))
 
 
 @main.command()
 @click.option("--only", "-o", default=None, help="Restore only a specific file path.")
 @click.option("--no-render", is_flag=True, help="Skip template rendering, write raw content.")
+@click.option(
+    "--dry-run", is_flag=True, help="Preview what would be restored without making changes."
+)
+@click.option(
+    "--conflict-strategy",
+    type=click.Choice(["skip", "keep-local", "keep-repo", "keep-newer", "make-backup", "abort"]),
+    default="make-backup",
+    help="How to handle sync conflicts.",
+)
 @_handle_error
-def restore(only: str | None, no_render: bool) -> None:
+def restore(only: str | None, no_render: bool, dry_run: bool, conflict_strategy: str) -> None:
     """Copy files from the repo back to their original locations."""
+    from .conflicts import ConflictStrategy
+
+    strategy_map = {
+        "skip": ConflictStrategy.SKIP,
+        "keep-local": ConflictStrategy.KEEP_LOCAL,
+        "keep-repo": ConflictStrategy.KEEP_REPO,
+        "keep-newer": ConflictStrategy.KEEP_NEWER,
+        "make-backup": ConflictStrategy.MAKE_BACKUP,
+        "abort": ConflictStrategy.ABORT,
+    }
     sync = DotfileSync()
-    result = sync.restore(only=only, render=not no_render)
+    result = sync.restore(
+        only=only,
+        render=not no_render,
+        dry_run=dry_run,
+        conflict_strategy=strategy_map[conflict_strategy],
+    )
     console.print(Panel(result, title="📂 Restore", border_style="green"))
 
 
@@ -395,5 +442,188 @@ def profile_show() -> None:
     console.print(f"  Machine name:   [cyan]{machine}[/cyan]")
 
 
-if __name__ == "__main__":
-    main()
+# --- Hook Commands ---
+
+
+@main.group()
+def hook() -> None:
+    """Manage hooks (commands that run before/after sync operations)."""
+    pass
+
+
+@hook.command("list")
+@_handle_error
+def hook_list() -> None:
+    """List all configured hooks."""
+    from .hooks import create_hook_config
+
+    sync = DotfileSync()
+    sync._ensure_initialized()
+    config = create_hook_config(sync.repo_dir)
+    all_hooks = config.list_all()
+
+    if not all_hooks:
+        console.print("[yellow]No hooks configured[/yellow]")
+        return
+
+    console.print("[bold]Configured hooks:[/bold]")
+    for event_name, commands in sorted(all_hooks.items()):
+        console.print(f"  [cyan]{event_name}[/cyan]:")
+        for i, cmd in enumerate(commands, 1):
+            console.print(f"    {i}. {cmd}")
+
+
+@hook.command("set")
+@click.argument(
+    "event",
+    type=click.Choice([
+        "pre-backup",
+        "post-backup",
+        "pre-restore",
+        "post-restore",
+        "pre-track",
+        "post-track",
+    ]),
+)
+@click.argument("command")
+@_handle_error
+def hook_set(event: str, command: str) -> None:
+    """Add a hook command for an event.
+
+    \b
+    Events: pre-backup, post-backup, pre-restore, post-restore,
+            pre-track, post-track
+    """
+    from .hooks import HookEvent, create_hook_config
+
+    event_map = {
+        "pre-backup": HookEvent.PRE_BACKUP,
+        "post-backup": HookEvent.POST_BACKUP,
+        "pre-restore": HookEvent.PRE_RESTORE,
+        "post-restore": HookEvent.POST_RESTORE,
+        "pre-track": HookEvent.PRE_TRACK,
+        "post-track": HookEvent.POST_TRACK,
+    }
+
+    sync = DotfileSync()
+    sync._ensure_initialized()
+    config = create_hook_config(sync.repo_dir)
+    config.add_hook(event_map[event], command)
+    console.print(f"[green]✓[/green] Hook added: {event} → {command}")
+
+
+@hook.command("remove")
+@click.argument(
+    "event",
+    type=click.Choice([
+        "pre-backup",
+        "post-backup",
+        "pre-restore",
+        "post-restore",
+        "pre-track",
+        "post-track",
+    ]),
+)
+@click.argument("index", type=int)
+@_handle_error
+def hook_remove(event: str, index: int) -> None:
+    """Remove a hook by its index."""
+    from .hooks import HookEvent, create_hook_config
+
+    event_map = {
+        "pre-backup": HookEvent.PRE_BACKUP,
+        "post-backup": HookEvent.POST_BACKUP,
+        "pre-restore": HookEvent.PRE_RESTORE,
+        "post-restore": HookEvent.POST_RESTORE,
+        "pre-track": HookEvent.PRE_TRACK,
+        "post-track": HookEvent.POST_TRACK,
+    }
+
+    sync = DotfileSync()
+    sync._ensure_initialized()
+    config = create_hook_config(sync.repo_dir)
+    if config.remove_hook(event_map[event], index - 1):  # 1-indexed display
+        console.print(f"[yellow]✗[/yellow] Removed hook #{index} from {event}")
+    else:
+        console.print(f"[yellow]Invalid hook index: {index}[/yellow]")
+
+
+# --- Ignore Commands ---
+
+
+@main.group()
+def ignore() -> None:
+    """Manage ignore patterns (like .gitignore)."""
+    pass
+
+
+@ignore.command("list")
+@_handle_error
+def ignore_list() -> None:
+    """List all active ignore patterns."""
+    from .ignore import create_ignore_matcher
+
+    sync = DotfileSync()
+    sync._ensure_initialized()
+    matcher = create_ignore_matcher(sync.repo_dir)
+
+    console.print(f"[bold]Ignore patterns ({matcher.count()}):[/bold]")
+    for i, pattern in enumerate(matcher.patterns, 1):
+        if not pattern.raw or pattern.raw.startswith("#"):
+            continue
+        label = ""
+        if pattern.negated:
+            label = " [dim](negated)[/dim]"
+        elif pattern.directory_only:
+            label = " [dim](dir)[/dim]"
+        console.print(f"  {i}. [cyan]{pattern.raw}[/cyan]{label}")
+
+
+@ignore.command("add")
+@click.argument("pattern")
+@_handle_error
+def ignore_add(pattern: str) -> None:
+    """Add an ignore pattern. Supports gitignore syntax."""
+    sync = DotfileSync()
+    sync._ensure_initialized()
+
+    # Append to .dotfileignore file
+    ignore_file = sync.repo_dir / ".dotfileignore"
+    try:
+        with ignore_file.open("a") as f:
+            f.write(pattern + "\n")
+    except OSError as exc:
+        raise DotfileSyncError(f"Failed to write ignore file: {exc}") from exc
+
+    console.print(f"[green]✓[/green] Added ignore pattern: {pattern}")
+
+
+# --- Dry-Run Commands ---
+
+
+@main.command("dry-run")
+@click.option("--operation", type=click.Choice(["backup", "restore"]), default="backup")
+@click.option("--only", "-o", default=None, help="Only check this specific file.")
+@_handle_error
+def dry_run(operation: str, only: str | None) -> None:
+    """Preview what backup or restore would do without making changes."""
+    from .dryrun import DryRunPreview, format_dry_run
+    from .ignore import create_ignore_matcher
+
+    sync = DotfileSync()
+    sync._ensure_initialized()
+
+    ignore_matcher = create_ignore_matcher(sync.repo_dir)
+    preview = DryRunPreview(sync)
+
+    if operation == "backup":
+        result = preview.preview_backup(ignore_matcher=ignore_matcher)
+    else:
+        result = preview.preview_restore(
+            only=only,
+            render=True,
+            ignore_matcher=ignore_matcher,
+        )
+
+    formatted = format_dry_run(result)
+    console.print(formatted)
